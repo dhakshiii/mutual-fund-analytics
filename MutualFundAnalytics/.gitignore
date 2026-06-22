@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+data/processed/*.csv
+reports/ingestion_summary.txt
+
+.DS_Store
+Thumbs.db

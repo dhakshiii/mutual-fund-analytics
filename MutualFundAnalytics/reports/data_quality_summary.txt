@@ -1,0 +1,18 @@
+Mutual Fund Analytics - Data Quality Summary Template
+====================================================
+
+Total datasets:
+
+Missing values:
+
+Duplicate records:
+
+Invalid datatypes:
+
+AMFI code validation status:
+
+Recommendations:
+- Validate source files before ingestion.
+- Standardize date and NAV formats across all datasets.
+- Review duplicate rows before downstream transformations.
+- Confirm scheme codes against the official AMFI or API metadata.
