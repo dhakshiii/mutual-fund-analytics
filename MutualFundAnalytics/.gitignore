@@ -8,7 +8,6 @@ __pycache__/
 venv/
 env/
 
-data/processed/*.csv
 reports/ingestion_summary.txt
 
 .DS_Store
