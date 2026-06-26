@@ -10,7 +10,7 @@ import requests
 
 
 BASE_URL = "https://api.mfapi.in/mf"
-RAW_DATA_DIR = Path(__file__).resolve().parent / "data" / "raw"
+RAW_DATA_DIR = Path(__file__).resolve().parent / "data" / "raw" / "live_nav"
 REQUEST_TIMEOUT = 30
 
 SCHEMES: Dict[str, int] = {
@@ -79,7 +79,7 @@ def fetch_nav(scheme_name: str, scheme_code: int) -> pd.DataFrame:
 
 
 def save_csv(nav_frame: pd.DataFrame, scheme_name: str) -> Path:
-    """Save NAV history to the raw data directory and return the output path."""
+    """Save NAV history to data/raw/live_nav/ and return the output path."""
     RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
     output_path = RAW_DATA_DIR / sanitize_filename(scheme_name)
     nav_frame.to_csv(output_path, index=False)
