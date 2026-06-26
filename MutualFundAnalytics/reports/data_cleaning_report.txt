@@ -1,52 +1,33 @@
 Mutual Fund Analytics - Data Cleaning Report
-==================================================
-Files processed: 6
+=======================================================
 
-File name: axis_bluechip.csv
-Source rows: 3579
-Cleaned rows: 3579
-Duplicates removed: 0
-Missing values handled: 0
-Invalid NAV rows removed: 0
-Datatype errors skipped: 0
---------------------------------------------------
-File name: hdfc_top_100_direct.csv
-Source rows: 3105
-Cleaned rows: 3105
-Duplicates removed: 0
-Missing values handled: 0
-Invalid NAV rows removed: 0
-Datatype errors skipped: 0
---------------------------------------------------
-File name: icici_bluechip.csv
-Source rows: 3321
-Cleaned rows: 3320
-Duplicates removed: 0
-Missing values handled: 0
-Invalid NAV rows removed: 1
-Datatype errors skipped: 0
---------------------------------------------------
-File name: kotak_bluechip.csv
-Source rows: 3315
-Cleaned rows: 3315
-Duplicates removed: 0
-Missing values handled: 0
-Invalid NAV rows removed: 0
-Datatype errors skipped: 0
---------------------------------------------------
-File name: nippon_large_cap.csv
-Source rows: 3312
-Cleaned rows: 3312
-Duplicates removed: 0
-Missing values handled: 0
-Invalid NAV rows removed: 0
-Datatype errors skipped: 0
---------------------------------------------------
-File name: sbi_bluechip.csv
-Source rows: 3250
-Cleaned rows: 3250
-Duplicates removed: 0
-Missing values handled: 0
-Invalid NAV rows removed: 0
-Datatype errors skipped: 0
---------------------------------------------------
+
+--- 02_nav_history.csv ---
+  Source rows      : 46000
+  Invalid dates dropped : 0
+  Duplicates removed : 0
+  NAV forward-filled : 0
+  NAV <= 0 removed   : 0
+  Cleaned rows       : 46000
+  Saved to           : C:\Users\dhaks\OneDrive\Desktop\mutual-fund-analytics\MutualFundAnalytics\data\processed\nav_history.csv
+
+--- 08_investor_transactions.csv ---
+  Source rows      : 32778
+  Invalid dates dropped : 0
+  Invalid transaction_type dropped : 0
+  Amount <= 0 dropped : 0
+  Invalid KYC status dropped : 0
+  Cleaned rows       : 32778
+  Saved to           : C:\Users\dhaks\OneDrive\Desktop\mutual-fund-analytics\MutualFundAnalytics\data\processed\investor_transactions.csv
+
+--- 07_scheme_performance.csv ---
+  Source rows      : 40
+  Expense ratio out of range (flagged) : 0
+  Cleaned rows       : 40
+  Saved to           : C:\Users\dhaks\OneDrive\Desktop\mutual-fund-analytics\MutualFundAnalytics\data\processed\scheme_performance.csv
+
+=======================================================
+SUMMARY
+  nav_history      : 46000 rows
+  investor_txns    : 32778 rows
+  scheme_perf      : 40 rows

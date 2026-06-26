@@ -1,549 +1,327 @@
-"""Clean NAV datasets and generate Day 2 processed business data."""
+"""
+Clean official Bluestock datasets and save to data/processed/.
+
+Datasets cleaned:
+    02_nav_history.csv
+    07_scheme_performance.csv
+    08_investor_transactions.csv
+"""
 
 from __future__ import annotations
 
-import csv
-import random
-from collections import defaultdict
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Dict, List, Tuple
+
+import pandas as pd
 
 
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
-RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw"
-PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
+RAW_DIR = PROJECT_ROOT / "data" / "raw"
+PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 REPORTS_DIR = PROJECT_ROOT / "reports"
-CLEANING_REPORT_PATH = REPORTS_DIR / "data_cleaning_report.txt"
+CLEANING_REPORT = REPORTS_DIR / "data_cleaning_report.txt"
 
-RAW_FILE_NAMES = [
-    "axis_bluechip.csv",
-    "hdfc_top_100_direct.csv",
-    "icici_bluechip.csv",
-    "kotak_bluechip.csv",
-    "nippon_large_cap.csv",
-    "sbi_bluechip.csv",
-]
-
-STATE_WEIGHTS = [
-    ("Maharashtra", 0.18),
-    ("Karnataka", 0.11),
-    ("Delhi", 0.10),
-    ("Tamil Nadu", 0.09),
-    ("Gujarat", 0.08),
-    ("Telangana", 0.08),
-    ("West Bengal", 0.08),
-    ("Uttar Pradesh", 0.10),
-    ("Rajasthan", 0.06),
-    ("Kerala", 0.05),
-    ("Punjab", 0.04),
-    ("Madhya Pradesh", 0.03),
-]
-
-TRANSACTION_TYPES = [
-    ("SIP", 0.55),
-    ("Lumpsum", 0.25),
-    ("Redemption", 0.20),
-]
-
-KYC_STATUSES = [
-    ("Verified", 0.82),
-    ("Pending", 0.13),
-    ("Rejected", 0.05),
-]
-
-FUND_METADATA = {
-    "119092": {
-        "scheme_name": "Axis Bluechip",
-        "fund_house": "Axis Mutual Fund",
-        "category": "Equity",
-        "subcategory": "Large Cap",
-        "risk_grade": "Moderately High",
-        "expense_ratio": 1.54,
-        "aum": 34500.0,
-    },
-    "125497": {
-        "scheme_name": "HDFC Top 100 Direct",
-        "fund_house": "HDFC Mutual Fund",
-        "category": "Equity",
-        "subcategory": "Large Cap",
-        "risk_grade": "Moderately High",
-        "expense_ratio": 1.08,
-        "aum": 41800.0,
-    },
-    "120503": {
-        "scheme_name": "ICICI Bluechip",
-        "fund_house": "ICICI Prudential Mutual Fund",
-        "category": "Equity",
-        "subcategory": "Large Cap",
-        "risk_grade": "Moderately High",
-        "expense_ratio": 1.22,
-        "aum": 39250.0,
-    },
-    "120841": {
-        "scheme_name": "Kotak Bluechip",
-        "fund_house": "Kotak Mahindra Mutual Fund",
-        "category": "Equity",
-        "subcategory": "Large Cap",
-        "risk_grade": "Moderate",
-        "expense_ratio": 1.14,
-        "aum": 27640.0,
-    },
-    "118632": {
-        "scheme_name": "Nippon Large Cap",
-        "fund_house": "Nippon India Mutual Fund",
-        "category": "Equity",
-        "subcategory": "Large Cap",
-        "risk_grade": "Moderately High",
-        "expense_ratio": 1.67,
-        "aum": 25120.0,
-    },
-    "119551": {
-        "scheme_name": "SBI Bluechip",
-        "fund_house": "SBI Mutual Fund",
-        "category": "Equity",
-        "subcategory": "Large Cap",
-        "risk_grade": "Moderate",
-        "expense_ratio": 0.94,
-        "aum": 43780.0,
-    },
-}
+VALID_TRANSACTION_TYPES = {"SIP", "Lumpsum", "Redemption"}
+VALID_KYC_STATUSES = {"Verified", "Pending", "Rejected"}
+EXPENSE_RATIO_MIN = 0.1
+EXPENSE_RATIO_MAX = 2.5
 
 
-@dataclass
-class CleanedNavRow:
-    """Represent one cleaned NAV observation."""
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    scheme_code: str
-    scheme_name: str
-    nav_date: date
-    nav: float
-
-
-@dataclass
-class CleaningStats:
-    """Track per-file cleaning outcomes."""
-
-    file_name: str
-    source_rows: int = 0
-    cleaned_rows: int = 0
-    duplicates_removed: int = 0
-    missing_values_handled: int = 0
-    invalid_nav_rows_removed: int = 0
-    datatype_errors: int = 0
-
-
-def weighted_choice(options: list[tuple[str, float]], rng: random.Random) -> str:
-    """Pick a value from weighted string options."""
-    threshold = rng.random()
-    cumulative = 0.0
-    for label, weight in options:
-        cumulative += weight
-        if threshold <= cumulative:
-            return label
-    return options[-1][0]
-
-
-def ensure_directories() -> None:
-    """Create required output directories."""
-    PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_dirs() -> None:
+    """Create output directories if they do not exist."""
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def read_raw_rows(file_path: Path, stats: CleaningStats) -> list[dict[str, object]]:
-    """Read raw CSV rows and cast key fields into business-ready types."""
-    parsed_rows: list[dict[str, object]] = []
-
-    with file_path.open("r", encoding="utf-8", newline="") as csv_file:
-        reader = csv.DictReader(csv_file)
-
-        for raw_row in reader:
-            stats.source_rows += 1
-            try:
-                scheme_code = str(raw_row["scheme_code"]).strip()
-                scheme_name = str(raw_row["scheme_name"]).strip()
-                nav_date = datetime.strptime(
-                    str(raw_row["date"]).strip(), "%Y-%m-%d"
-                ).date()
-
-                nav_text = str(raw_row["nav"]).strip()
-                nav_value = float(nav_text) if nav_text else None
-            except (KeyError, TypeError, ValueError):
-                stats.datatype_errors += 1
-                continue
-
-            parsed_rows.append(
-                {
-                    "scheme_code": scheme_code,
-                    "scheme_name": scheme_name,
-                    "date": nav_date,
-                    "nav": nav_value,
-                }
-            )
-
-    return parsed_rows
+def _log(lines: List[str], message: str) -> None:
+    """Append a message to the report lines list and print it."""
+    print(message)
+    lines.append(message)
 
 
-def deduplicate_rows(rows: Iterable[dict[str, object]], stats: CleaningStats) -> list[dict[str, object]]:
-    """Remove duplicated scheme-date observations while preserving the first row."""
-    unique_rows: list[dict[str, object]] = []
-    seen_keys: set[tuple[str, date]] = set()
+# ---------------------------------------------------------------------------
+# 02_nav_history.csv
+# ---------------------------------------------------------------------------
 
-    for row in rows:
-        row_key = (str(row["scheme_code"]), row["date"])
-        if row_key in seen_keys:
-            stats.duplicates_removed += 1
-            continue
-        seen_keys.add(row_key)
-        unique_rows.append(row)
+def clean_nav_history(report: List[str]) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """
+    Clean 02_nav_history.csv.
 
-    return unique_rows
+    Steps:
+        1. Convert date to datetime.
+        2. Sort by amfi_code then date.
+        3. Remove exact duplicate rows.
+        4. Forward-fill missing NAV values within each fund.
+        5. Drop rows where NAV <= 0.
 
+    Returns:
+        Tuple of (cleaned DataFrame, stats dict).
+    """
+    path = RAW_DIR / "02_nav_history.csv"
+    df = pd.read_csv(path)
+    stats: Dict[str, int] = {"source_rows": len(df)}
 
-def remove_invalid_nav_rows(
-    rows: Iterable[dict[str, object]], stats: CleaningStats
-) -> list[dict[str, object]]:
-    """Remove observations where NAV exists but is non-positive."""
-    valid_rows: list[dict[str, object]] = []
+    _log(report, "\n--- 02_nav_history.csv ---")
+    _log(report, f"  Source rows      : {stats['source_rows']}")
 
-    for row in rows:
-        nav_value = row["nav"]
-        if nav_value is not None and float(nav_value) <= 0:
-            stats.invalid_nav_rows_removed += 1
-            continue
-        valid_rows.append(row)
+    # 1. Convert date
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    invalid_dates = df["date"].isna().sum()
+    df = df.dropna(subset=["date"])
+    stats["invalid_date_rows_dropped"] = int(invalid_dates)
+    _log(report, f"  Invalid dates dropped : {invalid_dates}")
 
-    return valid_rows
+    # 2. Sort
+    df = df.sort_values(["amfi_code", "date"]).reset_index(drop=True)
 
+    # 3. Remove duplicates
+    before = len(df)
+    df = df.drop_duplicates(subset=["amfi_code", "date"])
+    stats["duplicates_removed"] = before - len(df)
+    _log(report, f"  Duplicates removed : {stats['duplicates_removed']}")
 
-def forward_fill_nav(rows: list[dict[str, object]], stats: CleaningStats) -> list[CleanedNavRow]:
-    """Forward fill NAV values after sorting by scheme code and date."""
-    last_nav_by_scheme: dict[str, float] = {}
-    cleaned_rows: list[CleanedNavRow] = []
+    # 4. Forward-fill missing NAV per fund
+    missing_before = df["nav"].isna().sum()
+    df["nav"] = df.groupby("amfi_code")["nav"].transform(
+        lambda s: s.ffill()
+    )
+    # Drop any remaining NaN (no prior value to fill from)
+    df = df.dropna(subset=["nav"])
+    stats["nav_forward_filled"] = int(missing_before)
+    _log(report, f"  NAV forward-filled : {missing_before}")
 
-    for row in rows:
-        scheme_code = str(row["scheme_code"])
-        nav_value = row["nav"]
+    # 5. Remove NAV <= 0
+    invalid_nav = (df["nav"] <= 0).sum()
+    df = df[df["nav"] > 0]
+    stats["invalid_nav_removed"] = int(invalid_nav)
+    _log(report, f"  NAV <= 0 removed   : {invalid_nav}")
 
-        if nav_value is None:
-            if scheme_code not in last_nav_by_scheme:
-                continue
-            nav_value = last_nav_by_scheme[scheme_code]
-            stats.missing_values_handled += 1
-        else:
-            nav_value = float(nav_value)
+    # Ensure correct dtypes
+    df["amfi_code"] = df["amfi_code"].astype(int)
+    df["nav"] = df["nav"].astype(float)
+    df["date"] = df["date"].dt.strftime("%Y-%m-%d")
 
-        last_nav_by_scheme[scheme_code] = nav_value
-        cleaned_rows.append(
-            CleanedNavRow(
-                scheme_code=scheme_code,
-                scheme_name=str(row["scheme_name"]),
-                nav_date=row["date"],
-                nav=nav_value,
-            )
-        )
+    stats["cleaned_rows"] = len(df)
+    _log(report, f"  Cleaned rows       : {stats['cleaned_rows']}")
 
-    return cleaned_rows
+    out = PROCESSED_DIR / "nav_history.csv"
+    df.to_csv(out, index=False)
+    _log(report, f"  Saved to           : {out}")
 
-
-def validate_cleaned_rows(rows: Iterable[CleanedNavRow]) -> None:
-    """Validate cleaned data types before persisting."""
-    for row in rows:
-        if not isinstance(row.scheme_code, str):
-            raise TypeError("scheme_code must be a string")
-        if not isinstance(row.scheme_name, str):
-            raise TypeError("scheme_name must be a string")
-        if not isinstance(row.nav_date, date):
-            raise TypeError("date must be a date instance")
-        if not isinstance(row.nav, float):
-            raise TypeError("nav must be a float")
+    return df, stats
 
 
-def write_cleaned_csv(output_path: Path, rows: list[CleanedNavRow]) -> None:
-    """Write cleaned NAV rows to a processed CSV."""
-    with output_path.open("w", encoding="utf-8", newline="") as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(["scheme_code", "scheme_name", "date", "nav"])
-        for row in rows:
-            writer.writerow(
-                [
-                    row.scheme_code,
-                    row.scheme_name,
-                    row.nav_date.isoformat(),
-                    f"{row.nav:.4f}",
-                ]
-            )
+# ---------------------------------------------------------------------------
+# 08_investor_transactions.csv
+# ---------------------------------------------------------------------------
+
+def _standardize_transaction_type(val: str) -> str:
+    """Normalise transaction_type to title case canonical form."""
+    mapping = {
+        "sip": "SIP",
+        "lumpsum": "Lumpsum",
+        "lump sum": "Lumpsum",
+        "lump_sum": "Lumpsum",
+        "redemption": "Redemption",
+        "redeem": "Redemption",
+    }
+    return mapping.get(str(val).strip().lower(), str(val).strip())
 
 
-def clean_nav_file(file_path: Path) -> tuple[list[CleanedNavRow], CleaningStats]:
-    """Clean one raw NAV file and save the processed result."""
-    stats = CleaningStats(file_name=file_path.name)
-    parsed_rows = read_raw_rows(file_path, stats)
-    parsed_rows.sort(key=lambda row: (str(row["scheme_code"]), row["date"]))
-    unique_rows = deduplicate_rows(parsed_rows, stats)
-    valid_rows = remove_invalid_nav_rows(unique_rows, stats)
-    cleaned_rows = forward_fill_nav(valid_rows, stats)
-    validate_cleaned_rows(cleaned_rows)
+def clean_investor_transactions(report: List[str]) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """
+    Clean 08_investor_transactions.csv.
 
-    output_name = file_path.stem + "_clean.csv"
-    output_path = PROCESSED_DATA_DIR / output_name
-    write_cleaned_csv(output_path, cleaned_rows)
+    Steps:
+        1. Convert transaction_date to datetime.
+        2. Standardise transaction_type casing.
+        3. Drop rows with unknown transaction_type.
+        4. Validate amount > 0; drop invalid.
+        5. Validate KYC status; drop invalid.
 
-    stats.cleaned_rows = len(cleaned_rows)
-    return cleaned_rows, stats
+    Returns:
+        Tuple of (cleaned DataFrame, stats dict).
+    """
+    path = RAW_DIR / "08_investor_transactions.csv"
+    df = pd.read_csv(path)
+    stats: Dict[str, int] = {"source_rows": len(df)}
+
+    _log(report, "\n--- 08_investor_transactions.csv ---")
+    _log(report, f"  Source rows      : {stats['source_rows']}")
+
+    # 1. Convert dates
+    df["transaction_date"] = pd.to_datetime(
+        df["transaction_date"], errors="coerce"
+    )
+    invalid_dates = df["transaction_date"].isna().sum()
+    df = df.dropna(subset=["transaction_date"])
+    stats["invalid_date_rows_dropped"] = int(invalid_dates)
+    _log(report, f"  Invalid dates dropped : {invalid_dates}")
+
+    # 2. Standardise transaction_type
+    df["transaction_type"] = df["transaction_type"].apply(
+        _standardize_transaction_type
+    )
+
+    # 3. Drop unknown transaction types
+    invalid_types = (~df["transaction_type"].isin(VALID_TRANSACTION_TYPES)).sum()
+    df = df[df["transaction_type"].isin(VALID_TRANSACTION_TYPES)]
+    stats["invalid_type_rows_dropped"] = int(invalid_types)
+    _log(report, f"  Invalid transaction_type dropped : {invalid_types}")
+
+    # 4. Validate amount > 0
+    invalid_amt = (df["amount_inr"] <= 0).sum()
+    df = df[df["amount_inr"] > 0]
+    stats["invalid_amount_rows_dropped"] = int(invalid_amt)
+    _log(report, f"  Amount <= 0 dropped : {invalid_amt}")
+
+    # 5. Validate KYC status
+    invalid_kyc = (~df["kyc_status"].isin(VALID_KYC_STATUSES)).sum()
+    df = df[df["kyc_status"].isin(VALID_KYC_STATUSES)]
+    stats["invalid_kyc_rows_dropped"] = int(invalid_kyc)
+    _log(report, f"  Invalid KYC status dropped : {invalid_kyc}")
+
+    # Final formatting
+    df["transaction_date"] = df["transaction_date"].dt.strftime("%Y-%m-%d")
+    df["amfi_code"] = df["amfi_code"].astype(int)
+    df["amount_inr"] = df["amount_inr"].astype(float)
+
+    stats["cleaned_rows"] = len(df)
+    _log(report, f"  Cleaned rows       : {stats['cleaned_rows']}")
+
+    out = PROCESSED_DIR / "investor_transactions.csv"
+    df.to_csv(out, index=False)
+    _log(report, f"  Saved to           : {out}")
+
+    return df, stats
 
 
-def write_cleaning_report(stats_list: list[CleaningStats]) -> None:
-    """Write the Day 2 data cleaning report."""
-    lines = [
+# ---------------------------------------------------------------------------
+# 07_scheme_performance.csv
+# ---------------------------------------------------------------------------
+
+def _flag_return_anomaly(series: pd.Series, label: str, report: List[str]) -> pd.Series:
+    """
+    Flag anomalous return values (>200% or <-100%) as NaN.
+
+    Returns the cleaned series and logs anomaly count.
+    """
+    anomaly_mask = (series > 200) | (series < -100)
+    count = int(anomaly_mask.sum())
+    if count:
+        _log(report, f"  Anomalous {label} values flagged NaN : {count}")
+    series = series.where(~anomaly_mask, other=pd.NA)
+    return series
+
+
+def clean_scheme_performance(report: List[str]) -> Tuple[pd.DataFrame, Dict[str, int]]:
+    """
+    Clean 07_scheme_performance.csv.
+
+    Steps:
+        1. Coerce return columns to numeric.
+        2. Flag return anomalies (>200% or <-100%) as NaN.
+        3. Validate expense_ratio_pct is within 0.1 – 2.5.
+           Rows outside range are flagged with a boolean column.
+
+    Returns:
+        Tuple of (cleaned DataFrame, stats dict).
+    """
+    path = RAW_DIR / "07_scheme_performance.csv"
+    df = pd.read_csv(path)
+    stats: Dict[str, int] = {"source_rows": len(df)}
+
+    _log(report, "\n--- 07_scheme_performance.csv ---")
+    _log(report, f"  Source rows      : {stats['source_rows']}")
+
+    # 1. Coerce return columns to numeric
+    return_cols = ["return_1yr_pct", "return_3yr_pct", "return_5yr_pct",
+                   "benchmark_3yr_pct", "alpha", "beta",
+                   "sharpe_ratio", "sortino_ratio",
+                   "std_dev_ann_pct", "max_drawdown_pct"]
+
+    for col in return_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # 2. Flag return anomalies
+    for col in ["return_1yr_pct", "return_3yr_pct", "return_5yr_pct"]:
+        if col in df.columns:
+            df[col] = _flag_return_anomaly(df[col], col, report)
+
+    # 3. Validate expense_ratio_pct
+    df["expense_ratio_pct"] = pd.to_numeric(
+        df["expense_ratio_pct"], errors="coerce"
+    )
+    invalid_expense = (
+        (df["expense_ratio_pct"] < EXPENSE_RATIO_MIN) |
+        (df["expense_ratio_pct"] > EXPENSE_RATIO_MAX)
+    ).sum()
+    df["expense_ratio_valid"] = (
+        df["expense_ratio_pct"].between(EXPENSE_RATIO_MIN, EXPENSE_RATIO_MAX)
+    )
+    stats["invalid_expense_ratio_flagged"] = int(invalid_expense)
+    _log(report, f"  Expense ratio out of range (flagged) : {invalid_expense}")
+
+    df["amfi_code"] = df["amfi_code"].astype(int)
+
+    stats["cleaned_rows"] = len(df)
+    _log(report, f"  Cleaned rows       : {stats['cleaned_rows']}")
+
+    out = PROCESSED_DIR / "scheme_performance.csv"
+    df.to_csv(out, index=False)
+    _log(report, f"  Saved to           : {out}")
+
+    return df, stats
+
+
+# ---------------------------------------------------------------------------
+# Report writer
+# ---------------------------------------------------------------------------
+
+def write_cleaning_report(report: List[str]) -> None:
+    """Write accumulated report lines to reports/data_cleaning_report.txt."""
+    header = [
         "Mutual Fund Analytics - Data Cleaning Report",
-        "=" * 50,
-        f"Files processed: {len(stats_list)}",
+        "=" * 55,
         "",
     ]
-
-    for stats in stats_list:
-        lines.extend(
-            [
-                f"File name: {stats.file_name}",
-                f"Source rows: {stats.source_rows}",
-                f"Cleaned rows: {stats.cleaned_rows}",
-                f"Duplicates removed: {stats.duplicates_removed}",
-                f"Missing values handled: {stats.missing_values_handled}",
-                f"Invalid NAV rows removed: {stats.invalid_nav_rows_removed}",
-                f"Datatype errors skipped: {stats.datatype_errors}",
-                "-" * 50,
-            ]
-        )
-
-    CLEANING_REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
-
-
-def trailing_return(nav_rows: list[CleanedNavRow], years: int) -> float:
-    """Calculate a trailing CAGR-like return from available NAV history."""
-    latest_row = nav_rows[-1]
-    target_date = latest_row.nav_date - timedelta(days=365 * years)
-    eligible_rows = [row for row in nav_rows if row.nav_date <= target_date]
-
-    if not eligible_rows:
-        return 0.0
-
-    base_row = eligible_rows[-1]
-    if base_row.nav <= 0:
-        return 0.0
-
-    year_span = max((latest_row.nav_date - base_row.nav_date).days / 365.25, 1)
-    cagr = ((latest_row.nav / base_row.nav) ** (1 / year_span) - 1) * 100
-    return round(cagr, 2)
-
-
-def write_csv(output_path: Path, header: list[str], rows: Iterable[list[object]]) -> None:
-    """Write generic CSV rows to disk."""
-    with output_path.open("w", encoding="utf-8", newline="") as csv_file:
-        writer = csv.writer(csv_file)
-        writer.writerow(header)
-        writer.writerows(rows)
-
-
-def generate_fund_master(scheme_codes: list[str]) -> int:
-    """Create the fund master dataset."""
-    output_path = PROCESSED_DATA_DIR / "fund_master.csv"
-    rows = []
-
-    for scheme_code in scheme_codes:
-        metadata = FUND_METADATA[scheme_code]
-        rows.append(
-            [
-                scheme_code,
-                metadata["scheme_name"],
-                metadata["fund_house"],
-                metadata["category"],
-                metadata["subcategory"],
-                metadata["risk_grade"],
-            ]
-        )
-
-    write_csv(
-        output_path,
-        [
-            "scheme_code",
-            "scheme_name",
-            "fund_house",
-            "category",
-            "subcategory",
-            "risk_grade",
-        ],
-        rows,
+    CLEANING_REPORT.write_text(
+        "\n".join(header + report), encoding="utf-8"
     )
-    return len(rows)
+    print(f"\nCleaning report saved -> {CLEANING_REPORT}")
 
 
-def generate_scheme_performance(cleaned_data: dict[str, list[CleanedNavRow]]) -> int:
-    """Create scheme performance metrics from cleaned NAV history."""
-    output_path = PROCESSED_DATA_DIR / "scheme_performance.csv"
-    rows = []
-
-    for scheme_code, nav_rows in cleaned_data.items():
-        metadata = FUND_METADATA[scheme_code]
-        expense_ratio = float(metadata["expense_ratio"])
-        if not 0.1 <= expense_ratio <= 2.5:
-            raise ValueError(f"Expense ratio out of range for {scheme_code}")
-
-        rows.append(
-            [
-                scheme_code,
-                metadata["scheme_name"],
-                f"{trailing_return(nav_rows, 1):.2f}",
-                f"{trailing_return(nav_rows, 3):.2f}",
-                f"{trailing_return(nav_rows, 5):.2f}",
-                f"{expense_ratio:.2f}",
-            ]
-        )
-
-    write_csv(
-        output_path,
-        [
-            "scheme_code",
-            "scheme_name",
-            "return_1y",
-            "return_3y",
-            "return_5y",
-            "expense_ratio",
-        ],
-        rows,
-    )
-    return len(rows)
-
-
-def random_transaction_amount(transaction_type: str, rng: random.Random) -> float:
-    """Generate a realistic transaction amount by transaction type."""
-    if transaction_type == "SIP":
-        amount = rng.randrange(500, 25001, 500)
-    elif transaction_type == "Lumpsum":
-        amount = rng.randrange(10000, 500001, 5000)
-    else:
-        amount = rng.randrange(1000, 300001, 1000)
-    return float(amount)
-
-
-def generate_investor_transactions(cleaned_data: dict[str, list[CleanedNavRow]]) -> int:
-    """Create a synthetic investor transaction dataset."""
-    output_path = PROCESSED_DATA_DIR / "investor_transactions.csv"
-    rng = random.Random(20260624)
-    scheme_codes = list(cleaned_data.keys())
-    scheme_weights = []
-    total_aum = sum(float(FUND_METADATA[code]["aum"]) for code in scheme_codes)
-
-    for scheme_code in scheme_codes:
-        scheme_weights.append(
-            (scheme_code, float(FUND_METADATA[scheme_code]["aum"]) / total_aum)
-        )
-
-    investor_counter = 1500
-    rows = []
-
-    for sequence in range(1, 5001):
-        scheme_code = weighted_choice(scheme_weights, rng)
-        nav_rows = cleaned_data[scheme_code]
-        min_date = nav_rows[0].nav_date
-        max_date = nav_rows[-1].nav_date
-        date_delta = max((max_date - min_date).days, 1)
-        transaction_date = min_date + timedelta(days=rng.randint(0, date_delta))
-        transaction_type = weighted_choice(TRANSACTION_TYPES, rng)
-        amount = random_transaction_amount(transaction_type, rng)
-        state = weighted_choice(STATE_WEIGHTS, rng)
-        kyc_status = weighted_choice(KYC_STATUSES, rng)
-
-        if rng.random() < 0.35:
-            investor_counter += 1
-        investor_id = f"INV{investor_counter:05d}"
-
-        rows.append(
-            [
-                f"TXN{sequence:06d}",
-                investor_id,
-                scheme_code,
-                transaction_date.isoformat(),
-                transaction_type,
-                f"{amount:.2f}",
-                state,
-                kyc_status,
-            ]
-        )
-
-    write_csv(
-        output_path,
-        [
-            "transaction_id",
-            "investor_id",
-            "scheme_code",
-            "transaction_date",
-            "transaction_type",
-            "amount",
-            "state",
-            "kyc_status",
-        ],
-        rows,
-    )
-    return len(rows)
-
-
-def generate_aum_data(scheme_codes: list[str]) -> int:
-    """Create a synthetic AUM dataset."""
-    output_path = PROCESSED_DATA_DIR / "aum_data.csv"
-    rows = []
-
-    for scheme_code in scheme_codes:
-        metadata = FUND_METADATA[scheme_code]
-        rows.append(
-            [
-                scheme_code,
-                metadata["scheme_name"],
-                f"{float(metadata['aum']):.2f}",
-            ]
-        )
-
-    write_csv(output_path, ["scheme_code", "scheme_name", "aum"], rows)
-    return len(rows)
-
-
-def clean_all_nav_files() -> tuple[dict[str, list[CleanedNavRow]], list[CleaningStats]]:
-    """Clean all required raw NAV files and return the in-memory result."""
-    cleaned_data: dict[str, list[CleanedNavRow]] = {}
-    stats_list: list[CleaningStats] = []
-
-    for file_name in RAW_FILE_NAMES:
-        file_path = RAW_DATA_DIR / file_name
-        cleaned_rows, stats = clean_nav_file(file_path)
-        stats_list.append(stats)
-
-        if cleaned_rows:
-            cleaned_data[cleaned_rows[0].scheme_code] = cleaned_rows
-
-    return cleaned_data, stats_list
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Execute Day 2 cleaning and processed dataset generation."""
-    ensure_directories()
-    cleaned_data, stats_list = clean_all_nav_files()
-    write_cleaning_report(stats_list)
+    """Run all cleaning steps and generate the cleaning report."""
+    ensure_dirs()
+    report: List[str] = []
 
-    scheme_codes = sorted(cleaned_data)
-    fund_master_rows = generate_fund_master(scheme_codes)
-    performance_rows = generate_scheme_performance(cleaned_data)
-    transaction_rows = generate_investor_transactions(cleaned_data)
-    aum_rows = generate_aum_data(scheme_codes)
+    nav_df, nav_stats = clean_nav_history(report)
+    txn_df, txn_stats = clean_investor_transactions(report)
+    perf_df, perf_stats = clean_scheme_performance(report)
 
-    total_nav_rows = sum(len(rows) for rows in cleaned_data.values())
-    print(f"Cleaned NAV files: {len(stats_list)}")
-    print(f"Total cleaned NAV rows: {total_nav_rows}")
-    print(f"Generated fund_master rows: {fund_master_rows}")
-    print(f"Generated scheme_performance rows: {performance_rows}")
-    print(f"Generated investor_transactions rows: {transaction_rows}")
-    print(f"Generated aum_data rows: {aum_rows}")
-    print(f"Cleaning report: {CLEANING_REPORT_PATH}")
+    # Summary
+    report.append("\n" + "=" * 55)
+    report.append("SUMMARY")
+    report.append(f"  nav_history      : {nav_stats['cleaned_rows']} rows")
+    report.append(f"  investor_txns    : {txn_stats['cleaned_rows']} rows")
+    report.append(f"  scheme_perf      : {perf_stats['cleaned_rows']} rows")
+
+    write_cleaning_report(report)
+
+    print(f"\nAll cleaned files saved to: {PROCESSED_DIR}")
 
 
 if __name__ == "__main__":
